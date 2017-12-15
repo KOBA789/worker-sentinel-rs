@@ -1,7 +1,7 @@
 use std::thread;
 use std::sync::{atomic, Arc};
 
-pub trait Work: Clone + Send + Sync {
+pub trait Work: Clone + Send {
     fn work(&mut self);
 }
 
