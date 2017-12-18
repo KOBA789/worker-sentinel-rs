@@ -1,63 +1,96 @@
 use std::thread;
 use std::sync::{atomic, Arc};
 
-pub trait Work: Clone + Send {
-    fn work(&mut self);
+pub trait Work: Send + Sized {
+    fn work(self, baton: Baton<Self>) -> Baton<Self>;
 }
 
-#[derive(Clone)]
-struct Shared<W>
+pub trait WorkFactory: Sync + Send {
+    type Work: Work;
+    fn build(&self) -> Self::Work;
+}
+impl<W: Work, F: Fn() -> W + Sync + Send> WorkFactory for F {
+    type Work = W;
+    fn build(&self) -> W {
+        self()
+    }
+}
+
+pub struct Baton<W>
 where
     W: Work + 'static,
 {
-    work: W,
-    count: Arc<atomic::AtomicUsize>,
+    work_factory: Arc<WorkFactory<Work = W>>,
     desired: usize,
+    count: Arc<atomic::AtomicUsize>,
 }
 
-pub struct Sentinel<W>
+impl<W> Baton<W>
 where
     W: Work + 'static,
 {
-    shared: Shared<W>,
+    fn spawn(self) {
+        let work = self.work_factory.build();
+        thread::spawn(move || {
+            work.work(self);
+        });
+    }
+}
+
+struct Sentinel<W>
+where
+    W: Work + 'static,
+{
+    work_factory: Arc<WorkFactory<Work = W>>,
+    desired: usize,
+    count: Arc<atomic::AtomicUsize>,
 }
 impl<W> Sentinel<W>
 where
     W: Work + 'static,
 {
-    pub fn spawn(desired: usize, work: W) {
-        let master = Sentinel {
-            shared: Shared {
-                work,
-                desired,
-                count: Arc::new(atomic::AtomicUsize::new(1)),
-            },
-        };
-        master.balance();
+    pub fn new<F: WorkFactory<Work = W> + 'static>(desired: usize, work_factory: F) -> Self {
+        let count = Arc::new(atomic::AtomicUsize::new(0));
+        let arc_work_factory = Arc::new(work_factory);
+        Sentinel { work_factory: arc_work_factory, desired, count }
     }
 
     fn balance(&self) {
-        while self.shared.count.load(atomic::Ordering::SeqCst) < self.shared.desired {
-            let mut copy = self.clone();
-            thread::spawn(move || { copy.shared.work.work(); });
+        loop {
+            let curr = self.count.load(atomic::Ordering::SeqCst);
+            if curr >= self.desired {
+                break;
+            }
+            let prev = self.count.compare_and_swap(curr, curr + 1, atomic::Ordering::SeqCst);
+            if prev != curr {
+                continue;
+            }
+            let work_factory = self.work_factory.clone();
+            let desired = self.desired;
+            let count = self.count.clone();
+            let baton = Baton { work_factory, desired, count };
+            baton.spawn();
         }
     }
 }
-impl<W> Drop for Sentinel<W>
+impl<W> Drop for Baton<W>
 where
-    W: Work,
+    W: Work + 'static,
 {
     fn drop(&mut self) {
-        self.shared.count.fetch_sub(1, atomic::Ordering::Relaxed);
-        self.balance();
+        self.count.fetch_sub(1, atomic::Ordering::SeqCst);
+
+        let work_factory = self.work_factory.clone();
+        let desired = self.desired;
+        let count = self.count.clone();
+        let sentinel = Sentinel { work_factory, desired, count };
+        sentinel.balance();
     }
 }
-impl<W> Clone for Sentinel<W>
+
+pub fn spawn<F>(desired: usize, work_factory: F)
 where
-    W: Work,
+    F: WorkFactory + 'static
 {
-    fn clone(&self) -> Sentinel<W> {
-        self.shared.count.fetch_add(1, atomic::Ordering::Relaxed);
-        Sentinel { shared: self.shared.clone() }
-    }
+    Sentinel::new(desired, work_factory).balance();
 }

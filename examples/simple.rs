@@ -10,24 +10,20 @@ struct SimpleWork {
     random_sleep: u64,
 }
 impl Work for SimpleWork {
-    fn work(&mut self) {
+    fn work(self, baton: Baton<Self>) -> Baton<Self> {
         println!("spawned & sleeping: {}ms", self.random_sleep);
         thread::sleep(time::Duration::from_millis(self.random_sleep));
         println!("exited");
-    }
-}
-impl Clone for SimpleWork {
-    fn clone(&self) -> SimpleWork {
-        let mut rng = rand::OsRng::new().unwrap();
-        SimpleWork {
-            random_sleep: rng.gen_range(1000, 3000),
-        }
+        baton
     }
 }
 
 fn main() {
-    let w = SimpleWork { random_sleep: 100 };
-    Sentinel::spawn(3, w);
-
+    spawn(3, || {
+        let mut rng = rand::OsRng::new().unwrap();
+        SimpleWork {
+            random_sleep: rng.gen_range(1000, 3000),
+        }
+    });
     thread::park();
 }
