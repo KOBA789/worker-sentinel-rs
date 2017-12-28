@@ -23,6 +23,7 @@ where
     work_factory: Arc<WorkFactory<Work = W>>,
     desired: usize,
     count: Arc<atomic::AtomicUsize>,
+    no_more: bool,
 }
 
 impl<W> Baton<W>
@@ -34,6 +35,10 @@ where
         thread::spawn(move || {
             work.work(self);
         });
+    }
+
+    pub fn no_more(&mut self) {
+        self.no_more = true;
     }
 }
 
@@ -68,7 +73,7 @@ where
             let work_factory = self.work_factory.clone();
             let desired = self.desired;
             let count = self.count.clone();
-            let baton = Baton { work_factory, desired, count };
+            let baton = Baton { work_factory, desired, count, no_more: false };
             baton.spawn();
         }
     }
@@ -78,6 +83,9 @@ where
     W: Work + 'static,
 {
     fn drop(&mut self) {
+        if self.no_more {
+            return;
+        }
         self.count.fetch_sub(1, atomic::Ordering::SeqCst);
 
         let work_factory = self.work_factory.clone();
