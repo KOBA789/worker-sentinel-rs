@@ -1,6 +1,6 @@
 [package]
 name = "worker-sentinel"
-version = "0.2.1"
+version = "0.3.0"
 authors = ["KOBA789 <kobahide789@gmail.com>"]
 
 [dependencies]

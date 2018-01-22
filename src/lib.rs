@@ -1,104 +1,97 @@
 use std::thread;
 use std::sync::{atomic, Arc};
 
-pub trait Work: Send + Sized {
-    fn work(self, baton: Baton<Self>) -> Baton<Self>;
+pub trait Work: Send + Sized + 'static {
+    fn work(self) -> Option<Self>;
 }
 
-pub trait WorkFactory: Sync + Send {
-    type Work: Work;
+pub trait WorkFactory: Sync + Send + Sized + 'static {
+    type Work: Work + 'static;
     fn build(&self) -> Self::Work;
 }
-impl<W: Work, F: Fn() -> W + Sync + Send> WorkFactory for F {
+impl<W, F> WorkFactory for F
+where
+    W: Work,
+    F: Fn() -> W + Sync + Send + 'static,
+{
     type Work = W;
     fn build(&self) -> W {
         self()
     }
 }
 
-pub struct Baton<W>
+pub struct Baton<F>
 where
-    W: Work + 'static,
+    F: WorkFactory,
 {
-    work_factory: Arc<WorkFactory<Work = W>>,
-    desired: usize,
-    count: Arc<atomic::AtomicUsize>,
-    no_more: bool,
+    sentinel: Arc<Sentinel<F>>,
 }
 
-impl<W> Baton<W>
+struct Sentinel<F>
 where
-    W: Work + 'static,
+    F: WorkFactory,
 {
-    fn spawn(self) {
-        let work = self.work_factory.build();
+    work_factory: F,
+    desired: atomic::AtomicUsize,
+    count: atomic::AtomicUsize,
+}
+impl<F> Sentinel<F>
+where
+    F: WorkFactory,
+{
+    fn new(desired: usize, work_factory: F) -> Self {
+        let count = atomic::AtomicUsize::new(0);
+        let desired = atomic::AtomicUsize::new(desired);
+        Sentinel { work_factory, desired, count }
+    }
+}
+
+fn balance<F>(sentinel: &Arc<Sentinel<F>>)
+where
+    F: WorkFactory,
+{
+    loop {
+        let curr = sentinel.count.load(atomic::Ordering::SeqCst);
+        if curr >= sentinel.desired.load(atomic::Ordering::Relaxed) {
+            break;
+        }
+        let prev = sentinel.count.compare_and_swap(curr, curr + 1, atomic::Ordering::SeqCst);
+        if prev != curr {
+            continue;
+        }
+        let baton_sentinel = sentinel.clone();
+        let work = sentinel.work_factory.build();
         thread::spawn(move || {
-            work.work(self);
+            let baton = Baton { sentinel: baton_sentinel };
+            let mut work = work;
+            loop {
+                match work.work() {
+                    Some(next_work) => work = next_work,
+                    None => {
+                        baton.sentinel.desired.store(0, atomic::Ordering::SeqCst);
+                        return;
+                    },
+                }
+            }
         });
     }
-
-    pub fn no_more(&mut self) {
-        self.no_more = true;
-    }
 }
 
-struct Sentinel<W>
+impl<F> Drop for Baton<F>
 where
-    W: Work + 'static,
-{
-    work_factory: Arc<WorkFactory<Work = W>>,
-    desired: usize,
-    count: Arc<atomic::AtomicUsize>,
-}
-impl<W> Sentinel<W>
-where
-    W: Work + 'static,
-{
-    pub fn new<F: WorkFactory<Work = W> + 'static>(desired: usize, work_factory: F) -> Self {
-        let count = Arc::new(atomic::AtomicUsize::new(0));
-        let arc_work_factory = Arc::new(work_factory);
-        Sentinel { work_factory: arc_work_factory, desired, count }
-    }
-
-    fn balance(&self) {
-        loop {
-            let curr = self.count.load(atomic::Ordering::SeqCst);
-            if curr >= self.desired {
-                break;
-            }
-            let prev = self.count.compare_and_swap(curr, curr + 1, atomic::Ordering::SeqCst);
-            if prev != curr {
-                continue;
-            }
-            let work_factory = self.work_factory.clone();
-            let desired = self.desired;
-            let count = self.count.clone();
-            let baton = Baton { work_factory, desired, count, no_more: false };
-            baton.spawn();
-        }
-    }
-}
-impl<W> Drop for Baton<W>
-where
-    W: Work + 'static,
+    F: WorkFactory,
 {
     fn drop(&mut self) {
-        if self.no_more {
-            return;
-        }
-        self.count.fetch_sub(1, atomic::Ordering::SeqCst);
+        self.sentinel.count.fetch_sub(1, atomic::Ordering::SeqCst);
 
-        let work_factory = self.work_factory.clone();
-        let desired = self.desired;
-        let count = self.count.clone();
-        let sentinel = Sentinel { work_factory, desired, count };
-        sentinel.balance();
+        balance(&self.sentinel);
     }
 }
 
 pub fn spawn<F>(desired: usize, work_factory: F)
 where
-    F: WorkFactory + 'static
+    F: WorkFactory
 {
-    Sentinel::new(desired, work_factory).balance();
+    let sentinel = Arc::new(Sentinel::new(desired, work_factory));
+    balance(&sentinel);
 }
