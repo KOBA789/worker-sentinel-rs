@@ -2,6 +2,11 @@
 name = "worker-sentinel"
 version = "0.3.0"
 authors = ["KOBA789 <kobahide789@gmail.com>"]
+description = "It keeps the number of worker threads even if some threads exit."
+license-file = "LICENSE"
+documentation = "https://docs.rs/worker-sentinel"
+repository = "https://github.com/KOBA789/worker-sentinel-rs"
+readme = "README.md"
 
 [dependencies]
 
